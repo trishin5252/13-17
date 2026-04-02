@@ -24,8 +24,8 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, './')));
 
-// Хранилище подписок (в памяти)
-let subscriptions = [];
+// ===== ХРАНИЛИЩЕ ПОДПИСОК (используем Map для надёжного удаления) =====
+const subscriptions = new Map();
 
 const server = http.createServer(app);
 const io = socketIo(server, {
@@ -37,66 +37,229 @@ const io = socketIo(server, {
 
 // ===== WebSocket подключения =====
 io.on('connection', (socket) => {
-    console.log('Клиент подключён:', socket.id);
+    console.log('🔗 Клиент подключён:', socket.id);
 
     // Обработка события 'newTask' от клиента
     socket.on('newTask', (task) => {
-        console.log('Новая задача:', task);
+        console.log('📝 Новая задача:', task);
 
-        // Рассылаем событие всем подключённым клиентам
+        // Рассылаем событие всем подключённым клиентам через WebSocket
         io.emit('taskAdded', task);
 
-        // Отправляем push-уведомление всем подписанным
+        // Отправляем push-уведомление всем подписанным клиентам
         const payload = JSON.stringify({
-            title: 'Новая задача',
-            body: task.text || 'Добавлена новая заметка'
+            title: '📝 Новая задача',
+            body: task.text || 'Добавлена новая заметка',
+            icon: '/icons/icon-192x192.png',
+            badge: '/icons/icon-192x192.png',
+            tag: 'new-task',
+            requireInteraction: false
         });
 
-        subscriptions.forEach(sub => {
-            webpush.sendNotification(sub, payload)
+        // Отправляем push всем активным подпискам
+        for (const [endpoint, subscription] of subscriptions) {
+            webpush.sendNotification(subscription, payload)
+                .then(() => {
+                    console.log('✅ Push отправлен:', endpoint);
+                })
                 .catch(err => {
-                    console.error('Push error:', err.message);
-                    // Удаляем невалидную подписку
-                    if (err.statusCode === 410) {
-                        subscriptions = subscriptions.filter(s => s.endpoint !== sub.endpoint);
+                    console.error('❌ Push error:', err.message);
+                    
+                    // Если подписка недействительна (410/404) - удаляем её
+                    if (err.statusCode === 410 || err.statusCode === 404) {
+                        console.log('🗑️ Удаляем недействительную подписку:', endpoint);
+                        subscriptions.delete(endpoint);
                     }
                 });
-        });
+        }
     });
 
     socket.on('disconnect', () => {
-        console.log('Клиент отключён:', socket.id);
+        console.log('❌ Клиент отключён:', socket.id);
     });
 });
 
 // ===== Эндпоинты для push-подписок =====
+
+// Подписка на push-уведомления
 app.post('/subscribe', (req, res) => {
-    const subscription = req.body;
-    
-    // Проверяем, нет ли уже такой подписки
-    const exists = subscriptions.some(s => s.endpoint === subscription.endpoint);
-    if (!exists) {
-        subscriptions.push(subscription);
-        console.log('Новая подписка. Всего:', subscriptions.length);
+    try {
+        const subscription = req.body;
+        
+        if (!subscription || !subscription.endpoint) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid subscription data' 
+            });
+        }
+        
+        // Используем endpoint как уникальный ключ
+        const endpoint = subscription.endpoint;
+        
+        // Проверяем, нет ли уже такой подписки
+        if (subscriptions.has(endpoint)) {
+            console.log('ℹ️ Подписка уже существует:', endpoint);
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Подписка уже активна' 
+            });
+        }
+        
+        // Сохраняем подписку
+        subscriptions.set(endpoint, subscription);
+        
+        console.log('✅ Новая подписка. Всего:', subscriptions.size);
+        console.log('   Endpoint:', endpoint);
+        
+        res.status(201).json({ 
+            success: true, 
+            message: 'Подписка сохранена',
+            count: subscriptions.size
+        });
+        
+    } catch (error) {
+        console.error('❌ Ошибка подписки:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
-    
-    res.status(201).json({ message: 'Подписка сохранена' });
 });
 
+// Отписка от push-уведомлений (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 app.post('/unsubscribe', (req, res) => {
-    const { endpoint } = req.body;
-    subscriptions = subscriptions.filter(sub => sub.endpoint !== endpoint);
-    console.log('Подписка удалена. Осталось:', subscriptions.length);
-    res.status(200).json({ message: 'Подписка удалена' });
+    try {
+        const { endpoint } = req.body;
+        
+        if (!endpoint) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Endpoint is required' 
+            });
+        }
+        
+        // Удаляем подписку по endpoint
+        const wasDeleted = subscriptions.delete(endpoint);
+        
+        if (wasDeleted) {
+            console.log('✅ Подписка удалена:', endpoint);
+            console.log('   Осталось подписок:', subscriptions.size);
+            
+            res.status(200).json({ 
+                success: true, 
+                message: 'Подписка удалена',
+                count: subscriptions.size
+            });
+        } else {
+            console.log('⚠️ Подписка не найдена:', endpoint);
+            
+            res.status(200).json({ 
+                success: true, 
+                message: 'Подписка не найдена (уже удалена?)',
+                count: subscriptions.size
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Ошибка отписки:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
 });
 
 // Получение публичного VAPID ключа для клиента
 app.get('/vapid-public-key', (req, res) => {
-    res.json({ publicKey: vapidKeys.publicKey });
+    res.json({ 
+        success: true,
+        publicKey: vapidKeys.publicKey 
+    });
 });
 
+// ===== ТЕСТОВЫЙ ЭНДПОИНТ ДЛЯ ПРОВЕРКИ =====
+// Отправляет тестовое уведомление всем подписчикам
+app.post('/test-push', (req, res) => {
+    const { message } = req.body || {};
+    const title = message?.title || '🔔 Тестовое уведомление';
+    const body = message?.body || 'Это тестовое push-уведомление';
+    
+    const payload = JSON.stringify({
+        title: title,
+        body: body,
+        icon: '/icons/icon-192x192.png',
+        badge: '/icons/icon-192x192.png'
+    });
+    
+    let sent = 0;
+    let failed = 0;
+    
+    for (const [endpoint, subscription] of subscriptions) {
+        webpush.sendNotification(subscription, payload)
+            .then(() => sent++)
+            .catch(err => {
+                failed++;
+                console.error('❌ Push error:', err.message);
+                if (err.statusCode === 410 || err.statusCode === 404) {
+                    subscriptions.delete(endpoint);
+                }
+            });
+    }
+    
+    res.json({
+        success: true,
+        message: `Отправка запущена: ${subscriptions.size} подписок`,
+        sent: sent,
+        failed: failed
+    });
+});
+
+// ===== СТАТУС СЕРВЕРА =====
+app.get('/api/status', (req, res) => {
+    res.json({
+        success: true,
+        server: 'running',
+        uptime: process.uptime(),
+        subscriptions: subscriptions.size,
+        connectedClients: io.engine.clientsCount
+    });
+});
+
+// ===== ОБРАБОТКА НЕИЗВЕСТНЫХ МАРШРУТОВ =====
+app.use((req, res) => {
+    res.status(404).json({ 
+        success: false, 
+        error: 'Endpoint not found' 
+    });
+});
+
+// ===== ОБРАБОТКА ОШИБОК =====
+app.use((err, req, res, next) => {
+    console.error('❌ Server error:', err);
+    res.status(500).json({ 
+        success: false, 
+        error: err.message 
+    });
+});
+
+// ===== ЗАПУСК СЕРВЕРА =====
 const PORT = 3001;
 server.listen(PORT, () => {
-    console.log(`\n🚀 Сервер запущен на http://localhost:${PORT}`);
-    console.log(`📡 WebSocket готов к подключениям\n`);
+    console.log('\n' + '='.repeat(50));
+    console.log('🚀 Сервер заметок запущен');
+    console.log('📡 Порт:', PORT);
+    console.log('🌐 URL: http://localhost:' + PORT);
+    console.log('🔔 Push-уведомления: ВКЛЮЧЕНЫ');
+    console.log('📊 Подписок:', subscriptions.size);
+    console.log('='.repeat(50) + '\n');
+});
+
+// ===== ОБРАБОТКА ЗАВЕРШЕНИЯ РАБОТЫ =====
+process.on('SIGINT', () => {
+    console.log('\n🛑 Завершение работы сервера...');
+    console.log('💾 Сохранено подписок:', subscriptions.size);
+    server.close(() => {
+        console.log('✅ Сервер остановлен');
+        process.exit(0);
+    });
 });

@@ -1,2 +1,8 @@
 python -m http.server 8000 --bind 127.0.0.1 (13-14)
 node server.js
+npx web-push generate-vapid-keys - сгенерировать ключи и вставить в server.js
+// Очистить все кэши
+caches.keys().then(keys => keys.forEach(key => caches.delete(key)));
+
+// Перезагрузить страницу
+location.reload(true); (если иконки не отображабтся)

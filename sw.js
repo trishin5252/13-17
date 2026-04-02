@@ -11,6 +11,7 @@ const ASSETS = [
     '/content/home.html',
     '/content/about.html',
     '/icons/icon-192x192.png',
+    '/icons/icon-256x256.png',
     '/icons/icon-512x512.png'
 ];
 

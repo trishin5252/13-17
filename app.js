@@ -10,6 +10,7 @@ const disablePushBtn = document.getElementById('disable-push');
 const socket = io('http://localhost:3001');
 
 let publicKey = '';
+let pushSubscription = null;
 
 // ===== НАВИГАЦИЯ =====
 function setActiveButton(activeId) {
@@ -89,7 +90,7 @@ async function registerServiceWorker() {
             console.log('Service Worker зарегистрирован:', registration.scope);
             
             // Настраиваем кнопки push после регистрации SW
-            setupPushButtons(registration);
+            await setupPushButtons(registration);
             
         } catch (error) {
             console.error('Ошибка регистрации Service Worker:', error);
@@ -107,9 +108,11 @@ async function setupPushButtons(registration) {
     const subscription = await registration.pushManager.getSubscription();
     
     if (subscription) {
+        pushSubscription = subscription;
         enablePushBtn.style.display = 'none';
         disablePushBtn.style.display = 'inline-block';
     } else {
+        pushSubscription = null;
         enablePushBtn.style.display = 'inline-block';
         disablePushBtn.style.display = 'none';
     }
@@ -130,15 +133,11 @@ async function setupPushButtons(registration) {
         }
         
         await subscribeToPush(registration);
-        enablePushBtn.style.display = 'none';
-        disablePushBtn.style.display = 'inline-block';
     });
     
     // Обработчик отключения
     disablePushBtn.addEventListener('click', async () => {
         await unsubscribeFromPush(registration);
-        disablePushBtn.style.display = 'none';
-        enablePushBtn.style.display = 'inline-block';
     });
 }
 
@@ -155,17 +154,23 @@ async function subscribeToPush(registration) {
             applicationServerKey: urlBase64ToUint8Array(publicKey)
         });
         
-        // Отправляем подписку на сервер
+        // ✅ ОТПРАВЛЯЕМ ПОЛНУЮ ПОДПИСКУ НА СЕРВЕР
         await fetch('http://localhost:3001/subscribe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(subscription)
         });
         
-        console.log('Подписка на push отправлена');
+        pushSubscription = subscription;
+        console.log('✅ Подписка на push отправлена');
         showNotification('Уведомления включены!', 'success');
+        
+        // Обновляем кнопки
+        if (enablePushBtn) enablePushBtn.style.display = 'none';
+        if (disablePushBtn) disablePushBtn.style.display = 'inline-block';
+        
     } catch (err) {
-        console.error('Ошибка подписки на push:', err);
+        console.error('❌ Ошибка подписки на push:', err);
         showNotification('Ошибка включения уведомлений', 'error');
     }
 }
@@ -176,18 +181,30 @@ async function unsubscribeFromPush(registration) {
         const subscription = await registration.pushManager.getSubscription();
         
         if (subscription) {
+            // ✅ 1. Сначала отписываем браузер
+            await subscription.unsubscribe();
+            
+            // ✅ 2. Потом отправляем запрос на сервер
             await fetch('http://localhost:3001/unsubscribe', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ endpoint: subscription.endpoint })
+                body: JSON.stringify({
+                    endpoint: subscription.endpoint,
+                    keys: subscription.keys
+                })
             });
             
-            await subscription.unsubscribe();
-            console.log('Отписка выполнена');
+            pushSubscription = null;
+            console.log('✅ Отписка выполнена');
             showNotification('Уведомления отключены', 'success');
+            
+            // ✅ 3. Обновляем кнопки
+            if (enablePushBtn) enablePushBtn.style.display = 'inline-block';
+            if (disablePushBtn) disablePushBtn.style.display = 'none';
+            
         }
     } catch (err) {
-        console.error('Ошибка отписки:', err);
+        console.error('❌ Ошибка отписки:', err);
         showNotification('Ошибка отключения уведомлений', 'error');
     }
 }
